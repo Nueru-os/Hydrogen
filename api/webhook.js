@@ -34,7 +34,6 @@ export default async function handler(req, res) {
     let reply = "Maaf error.";
     if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
       reply = data.candidates[0].content.parts[0].text;
-      // INI KUNCINYA: BERSIHIN OTAK GEMMA YANG BOCOR
       reply = bersihinJawaban(reply);
     } else {
       reply = `Udah dicoba 15x tapi Gemma masih rame. Coba lagi 1 menit ya. Error: ${lastError}`;
@@ -49,13 +48,24 @@ export default async function handler(req, res) {
 
 async function callGemini(model, text, key) {
   const hariIni = new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Makassar' });
-  
-  // JANGAN pakai systemInstruction! Selipin perintahnya di sini aja
-  const promptLengkap = `Kamu adalah teman chat Telegram, bahasa Indonesia santai. Hari ini ${hariIni}. Jawab langsung saja, jangan tampilkan analisamu. Jangan tulis "User says", "Role", "Constraints", atau "Example". Langsung jawab pertanyaan ini saja:\n\nPertanyaan: ${text}\nJawaban:`;
+
+  // STRATEGI BARU: Paksa jawab di dalam <<<JAWABAN>>> ... <<<SELESAI>>>
+  const promptLengkap = `Kamu adalah teman chat Telegram, bahasa Indonesia santai. Hari ini ${hariIni}.
+
+Tugasmu: Jawab pertanyaan user.
+ATURAN KERAS: Kamu DILARANG menulis Persona, Language, Constraint, Input Question, Since, Considering, analisis, atau penjelasan apapun. Langsung tulis jawabanmu saja di dalam tanda ini.
+
+Format wajib:
+<<<JAWABAN>>>
+(tulis jawabanmu di sini saja)
+<<<SELESAI>>>
+
+Pertanyaan user: ${text}
+<<<JAWABAN>>>`;
 
   const body = {
     contents: [{ parts: [{ text: promptLengkap }] }],
-    generationConfig: { temperature: 0.7, maxOutputTokens: 8192 }
+    generationConfig: { temperature: 0.3, maxOutputTokens: 8192 }
   };
   const r = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
@@ -64,31 +74,36 @@ async function callGemini(model, text, key) {
   return await r.json();
 }
 
-// Fungsi buat motong bagian "User says:", "Role:", "Constraints:" dll
 function bersihinJawaban(teks) {
   let bersih = teks;
 
-  // Kalau ada kata "Jawaban:" ambil yang setelahnya aja
-  if (bersih.includes("Jawaban:")) {
-    const parts = bersih.split("Jawaban:");
-    bersih = parts[parts.length - 1];
+  // 1. Cara paling ampuh: Ambil yang ada di dalam <<<JAWABAN>>> ... <<<SELESAI>>>
+  if (bersih.includes("<<<JAWABAN>>>")) {
+    let potong = bersih.split("<<<JAWABAN>>>").pop();
+    if (potong.includes("<<<SELESAI>>>")) potong = potong.split("<<<SELESAI>>>")[0];
+    bersih = potong.trim();
+    // Kalau masih ada sisa ">>>" di depan, buang
+    bersih = bersih.replace(/^>>>/, "").trim();
+    if (bersih) return bersih;
+    bersih = teks; // kalau kosong, balik ke cara lama
   }
-  // Kalau masih ada "Example:" buang yang sebelum Example, ambil contoh jawabannya
-  // Contoh: 'Example: "Halo juga!"' -> jadi 'Halo juga!'
-  if (bersih.includes("Example:")) {
-    const match = bersih.match(/Example:\s*["']?([^"'\n]+)["']?/);
-    if (match) bersih = match[1];
+
+  // 2. Cara cadangan: Kalau dia masih nulis "Halo juga!" di dalam petik "..." di akhir, ambil petik terakhir itu
+  const semuaPetik = [...bersih.matchAll(/"([^"\n]{2,200})"/g)];
+  if (semuaPetik.length > 0) {
+    const terakhir = semuaPetik[semuaPetik.length - 1][1];
+    // Cuma ambil kalau petik terakhir itu kelihatan kayak jawaban, bukan kayak "halo?"
+    if (terakhir.toLowerCase() !== "halo?" && !terakhir.toLowerCase().includes("user says")) {
+      return terakhir;
+    }
   }
-  // Buang semua baris yang diawali * User, * Role, * Constraints, * Casual, dll
+
+  // 3. Cara terakhir: Buang semua baris bocor
   const baris = bersih.split("\n").filter(b => {
-    const bLower = b.toLowerCase().trim();
-    return !bLower.startsWith("* user") && !bLower.startsWith("* role") && !bLower.startsWith("* constraint") && !bLower.startsWith("* casual") && !bLower.startsWith("* direct") && !bLower.startsWith("* language") && !bLower.startsWith("* current date") && !bLower.startsWith("* today") && !bLower.startsWith("* tomorrow");
+    const l = b.toLowerCase().trim();
+    return !l.startsWith("persona:") && !l.startsWith("language:") && !l.startsWith("current date:") && !l.startsWith("constraint:") && !l.startsWith("input question:") && !l.startsWith("since") && !l.startsWith("considering") && !l.startsWith("* user") && !l.startsWith("* role") && !l.startsWith("* constraint") && !l.startsWith("jawaban:") && !l.startsWith("<<<");
   });
-  bersih = baris.join("\n").trim();
-
-  // Buang sisa markdown * yang nyangkut di awal baris
-  bersih = bersih.replace(/^\s*\*\s+/gm, "");
-
+  bersih = baris.join("\n").trim().replace(/^\s*\*\s+/gm, "");
   return bersih || teks;
 }
 
