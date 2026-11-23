@@ -1,6 +1,5 @@
 const MODEL = "gemini-4-hydrogen";
-const FALLBACK_MODEL = "gemini-2.0-flash";
-
+const FALLBACK_MODEL = "gemini-3.8-flash";
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(200).send("Bot Gemini 4 Hydrogen Jalan di Vercel!");
