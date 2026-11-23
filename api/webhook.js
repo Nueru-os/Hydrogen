@@ -7,11 +7,10 @@ export default async function handler(req, res) {
 
   const update = req.body;
 
-  // Biar Vercel tidak timeout, bales dulu "OK"
-  res.status(200).send("OK");
-
   try {
-    if (!update.message || !update.message.text) return;
+    if (!update.message || !update.message.text) {
+      return res.status(200).send("OK");
+    }
     const chatId = update.message.chat.id;
     const text = update.message.text;
     const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -19,7 +18,7 @@ export default async function handler(req, res) {
 
     if (text === "/start") {
       await kirim(chatId, "Halo! Saya Gemini 4 Hydrogen (Thinking HIGH) jalan di Vercel.", TELEGRAM_TOKEN);
-      return;
+      return res.status(200).send("OK");
     }
 
     await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendChatAction`, {
@@ -28,7 +27,6 @@ export default async function handler(req, res) {
       body: JSON.stringify({ chat_id: chatId, action: "typing" })
     });
 
-    // Panggil Gemini 4 Hydrogen
     const geminiRes = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
       {
@@ -36,8 +34,7 @@ export default async function handler(req, res) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: text }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
-          thinkingConfig: { thinkingLevel: "high", includeThoughts: false }
+          generationConfig: { temperature: 0.7, maxOutputTokens: 8192 }
         })
       }
     );
@@ -54,8 +51,11 @@ export default async function handler(req, res) {
       await kirim(chatId, reply.slice(i, i + 4096), TELEGRAM_TOKEN);
     }
 
+    return res.status(200).send("OK");
+
   } catch (e) {
     console.log(e);
+    return res.status(200).send("OK");
   }
 }
 
