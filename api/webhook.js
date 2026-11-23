@@ -1,12 +1,11 @@
 const MODEL = "gemini-4-hydrogen";
+const FALLBACK_MODEL = "gemini-2.0-flash";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(200).send("Bot Gemini 4 Hydrogen Jalan di Vercel!");
   }
-
   const update = req.body;
-
   try {
     if (!update.message || !update.message.text) {
       return res.status(200).send("OK");
@@ -27,47 +26,48 @@ export default async function handler(req, res) {
       body: JSON.stringify({ chat_id: chatId, action: "typing" })
     });
 
-    // Retry 3x kalau Google lagi high demand
-    let data = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const geminiRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: text }] }],
-            generationConfig: {
-              temperature: 0.7,
-              maxOutputTokens: 8192,
-              thinkingConfig: { thinkingLevel: "HIGH" }
-            }
-          })
-        }
-      );
-      data = await geminiRes.json();
-      if (!data.error || !data.error.message.includes("high demand")) break;
-      // Kalau masih high demand, tunggu dulu sebelum coba lagi
-      await new Promise(r => setTimeout(r, attempt * 3000));
+    let data = await callGemini(MODEL, text, GEMINI_API_KEY);
+
+    // Kalau Hydrogen habis jatah / rame, pindah ke Flash
+    if (data.error && (data.error.message.includes("Quota exceeded") || data.error.message.includes("high demand"))) {
+      await kirim(chatId, "Jatah Hydrogen 4 habis / lagi rame, aku pakai model cadangan dulu ya...", TELEGRAM_TOKEN);
+      data = await callGemini(FALLBACK_MODEL, text, GEMINI_API_KEY);
     }
 
     let reply = "Maaf error.";
     if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
       reply = data.candidates[0].content.parts[0].text;
     } else if (data.error) {
-      reply = "Google lagi rame banget, coba kirim lagi 1 menit lagi ya. Error: " + data.error.message;
+      reply = "Error: " + data.error.message;
     }
 
     for (let i = 0; i < reply.length; i += 4096) {
       await kirim(chatId, reply.slice(i, i + 4096), TELEGRAM_TOKEN);
     }
-
     return res.status(200).send("OK");
-
   } catch (e) {
     console.log(e);
     return res.status(200).send("OK");
   }
+}
+
+async function callGemini(model, text, key) {
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: text }] }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 8192,
+          thinkingConfig: { thinkingLevel: "HIGH" }
+        }
+      })
+    }
+  );
+  return await r.json();
 }
 
 async function kirim(chatId, text, token) {
