@@ -1,101 +1,86 @@
-// Gunakan nama model resmi dari Google Gemini API (urut dari yang paling pintar ke paling hemat limit)
-const MODELS = [
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-2.0-flash"
+// Daftar model prioritas utama
+const PRIMARY_MODELS = [
+  "gemini-4-hydrogen",
+  "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite"
 ];
 
-// Penyimpanan riwayat chat sementara di memori berdasarkan chatId
-const chatHistories = new Map();
-const MAX_HISTORY = 10; // Simpan maksimal 10 pesan terakhir agar hemat token
+// Menyimpan ID interaksi terakhir per chatId agar konteks nyambung di server Google
+const lastInteractionIds = new Map();
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(200).send("Bot Gemini Jalan!");
-  
+
   const update = req.body;
   try {
     if (!update.message || !update.message.text) return res.status(200).send("OK");
-    
+
     const chatId = update.message.chat.id;
     const text = update.message.text;
     const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-    // Perintah /start
-    if (text === "/start") {
-      chatHistories.delete(chatId);
-      await kirim(chatId, "Halo! Saya Gemini. Ketik apa saja untuk mulai ngobrol, atau ketik /reset untuk menghapus ingatan chat.", TELEGRAM_TOKEN);
+    // Perintah /start atau /reset untuk memulai topik obrolan baru
+    if (text === "/start" || text === "/reset") {
+      lastInteractionIds.delete(chatId);
+      const msg = text === "/start"
+        ? "Halo! Saya siap ngobrol. Ketik /reset kapan saja untuk menghapus ingatan topik sebelumnya."
+        : "Ingatan percakapan sudah di-reset. Yuk mulai topik baru!";
+      await kirim(chatId, msg, TELEGRAM_TOKEN);
       return res.status(200).send("OK");
     }
 
-    // Perintah /reset untuk membersihkan konteks obrolan
-    if (text === "/reset") {
-      chatHistories.delete(chatId);
-      await kirim(chatId, "Ingatan percakapan sudah dihapus. Yuk mulai topik baru!", TELEGRAM_TOKEN);
-      return res.status(200).send("OK");
-    }
-
-    // Tampilkan status "sedang mengetik..."
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendChatAction`, {
+    await fetch(`https://telegram.org{TELEGRAM_TOKEN}/sendChatAction`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, action: "typing" })
     });
 
-    // Ambil riwayat chat pengguna saat ini (jika belum ada, buat array kosong)
-    let history = chatHistories.get(chatId) || [];
+    const prevId = lastInteractionIds.get(chatId) || null;
+    let replyText = null;
+    let newInteractionId = null;
 
-    // Tambahkan pesan terbaru dari user ke dalam riwayat dengan role "user"
-    const currentContents = [
-      ...history,
-      { role: "user", parts: [{ text: text }] }
-    ];
-
-    let data = null;
-    let modelTerpakai = MODELS[0];
-    let lastError = "";
-
-    // Coba panggil model satu per satu jika terjadi limit (429) atau error
-    for (let i = 0; i < MODELS.length; i++) {
-      modelTerpakai = MODELS[i];
-      data = await callGemini(modelTerpakai, currentContents, GEMINI_API_KEY);
-      
-      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        break; // Berhasil mendapatkan jawaban, hentikan loop
+    // 1. Coba daftar model utama secara berurutan
+    for (const model of PRIMARY_MODELS) {
+      const result = await callInteractionsAPI(model, text, prevId, GEMINI_API_KEY);
+      if (result.text) {
+        replyText = result.text;
+        newInteractionId = result.id;
+        break;
       }
-      
-      lastError = data.error ? data.error.message : "Respon kosong";
-      console.log(`${modelTerpakai} gagal: ${lastError}`);
-      
-      if (i < MODELS.length - 1) {
-        await new Promise(r => setTimeout(r, 800)); // Jeda singkat sebelum pindah model
+      console.log(`[Skip] ${model}: ${result.error}`);
+    }
+
+    // 2. Jika semua model utama gagal/limit, otomatis cari model lain yang tersedia di akun Anda
+    if (!replyText) {
+      const fallbackModels = await getAvailableModels(GEMINI_API_KEY);
+      for (const model of fallbackModels) {
+        if (PRIMARY_MODELS.includes(model)) continue; // Lewati yang sudah dicoba
+        const result = await callInteractionsAPI(model, text, prevId, GEMINI_API_KEY);
+        if (result.text) {
+          replyText = result.text;
+          newInteractionId = result.id;
+          break;
+        }
       }
     }
 
-    let reply = "Maaf, terjadi gangguan pada sistem.";
-    const aiText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (aiText) {
-      reply = aiText;
-
-      // Simpan pesan user DAN balasan AI ke riwayat agar konteks tetap nyambung meski model berganti
-      history.push({ role: "user", parts: [{ text: text }] });
-      history.push({ role: "model", parts: [{ text: aiText }] });
-
-      // Potong riwayat lama jika melebihi batas agar tidak membengkak
-      if (history.length > MAX_HISTORY) {
-        history = history.slice(history.length - MAX_HISTORY);
+    // 3. Jika berhasil, simpan ID interaksi terbaru agar chat berikutnya tetap nyambung
+    if (replyText) {
+      if (newInteractionId) {
+        lastInteractionIds.set(chatId, newInteractionId);
       }
-      chatHistories.set(chatId, history);
-
+      for (let i = 0; i < replyText.length; i += 4096) {
+        await kirim(chatId, replyText.slice(i, i + 4096), TELEGRAM_TOKEN);
+      }
     } else {
-      reply = `Semua model Gemini sedang penuh/limit.\nDetail error: ${lastError}`;
-    }
-
-    // Kirim balasan (dipecah per 4096 karakter sesuai batas maksimal Telegram)
-    for (let i = 0; i < reply.length; i += 4096) {
-      await kirim(chatId, reply.slice(i, i + 4096), TELEGRAM_TOKEN);
+      // Pesan ramah tanpa menampilkan kode error teknis ke pengguna
+      await kirim(
+        chatId,
+        "Waduh, server AI lagi padat banget nih. Coba kirim ulang pesanmu beberapa saat lagi ya!",
+        TELEGRAM_TOKEN
+      );
     }
 
     return res.status(200).send("OK");
@@ -105,7 +90,8 @@ export default async function handler(req, res) {
   }
 }
 
-async function callGemini(model, contents, key) {
+// Fungsi memanggil Interactions API (mendukung perpindahan model tanpa kehilangan konteks)
+async function callInteractionsAPI(model, text, previousInteractionId, apiKey) {
   const hariIni = new Date().toLocaleDateString('id-ID', {
     weekday: 'long',
     day: 'numeric',
@@ -114,37 +100,86 @@ async function callGemini(model, contents, key) {
     timeZone: 'Asia/Makassar'
   });
 
-  const body = {
-    systemInstruction: {
-      parts: [{
-        text: `Kamu adalah teman chat Telegram, gunakan bahasa Indonesia yang santai, singkat, dan natural. Hari ini adalah ${hariIni}. Jawab langsung ke intinya tanpa menampilkan proses berpikir atau analisis panjang.`
-      }]
-    },
-    contents: contents, // Mengirim seluruh riwayat percakapan
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 2048
-    }
+  const payload = {
+    model: model,
+    input: text,
+    system_instruction: `Kamu adalah teman chat Telegram, bahasa Indonesia santai, singkat, dan natural. Hari ini ${hariIni}. Jawab langsung ke intinya tanpa menampilkan analisis atau proses berpikir.`
   };
 
-  // Nonaktifkan thinking hanya pada model 2.5-flash / 2.5-flash-lite agar respon instan
-  if (model.includes("2.5-flash")) {
-    body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  // Sambungkan dengan percakapan sebelumnya di server Google
+  if (previousInteractionId) {
+    payload.previous_interaction_id = previousInteractionId;
   }
 
-  const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+  try {
+    const response = await fetch(
+      "https://googleapis.com",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+          "Api-Revision": "2026-05-20"
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok || data.error) {
+      return { error: data.error?.message || `HTTP ${response.status}` };
     }
-  );
-  return await r.json();
+
+    // Ambil teks jawaban dari step model_output
+    let outputText = "";
+    if (Array.isArray(data.steps)) {
+      for (const step of data.steps) {
+        if (step.type === "model_output" && Array.isArray(step.content)) {
+          for (const item of step.content) {
+            if (item.type === "text" && item.text) {
+              outputText += item.text;
+            }
+          }
+        }
+      }
+    }
+
+    if (outputText.trim()) {
+      return { text: outputText.trim(), id: data.id };
+    }
+
+    return { error: "Output teks kosong" };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+// Otomatis mengambil daftar model teks terbaru yang didukung oleh API Key Anda
+async function getAvailableModels(apiKey) {
+  try {
+    const res = await fetch(
+      `https://googleapis.com{apiKey}`
+    );
+    const data = await res.json();
+    if (!Array.isArray(data.models)) return [];
+
+    return data.models
+      .filter(m =>
+        m.name.includes("gemini") &&
+        !m.name.includes("image") &&
+        !m.name.includes("tts") &&
+        !m.name.includes("embedding")
+      )
+      .map(m => m.name.replace("models/", ""))
+      .reverse(); // Urutkan dari versi terbaru
+  } catch {
+    return [];
+  }
 }
 
 async function kirim(chatId, text, token) {
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  await fetch(`https://telegram.org{token}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text })
