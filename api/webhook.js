@@ -27,24 +27,35 @@ export default async function handler(req, res) {
       body: JSON.stringify({ chat_id: chatId, action: "typing" })
     });
 
-    const geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: text }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 8192 }
-        })
-      }
-    );
+    // Retry 3x kalau Google lagi high demand
+    let data = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const geminiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: text }] }],
+            generationConfig: {
+              temperature: 0.7,
+              maxOutputTokens: 8192,
+              thinkingConfig: { thinkingLevel: "HIGH" }
+            }
+          })
+        }
+      );
+      data = await geminiRes.json();
+      if (!data.error || !data.error.message.includes("high demand")) break;
+      // Kalau masih high demand, tunggu dulu sebelum coba lagi
+      await new Promise(r => setTimeout(r, attempt * 3000));
+    }
 
-    const data = await geminiRes.json();
     let reply = "Maaf error.";
     if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
       reply = data.candidates[0].content.parts[0].text;
     } else if (data.error) {
-      reply = "Error: " + data.error.message;
+      reply = "Google lagi rame banget, coba kirim lagi 1 menit lagi ya. Error: " + data.error.message;
     }
 
     for (let i = 0; i < reply.length; i += 4096) {
