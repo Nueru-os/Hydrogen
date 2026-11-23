@@ -69,8 +69,21 @@ export default async function handler(req, res) {
 }
 
 async function callGemini(model, text, key) {
-  // Gemma TIDAK BOLEH pakai thinkingConfig!
+  const hariIni = new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Makassar' });
+
   const body = {
+    // INI KUNCINYA: Kasih System Instruction
+    systemInstruction: {
+      parts: [{ 
+        text: `Kamu adalah asisten Telegram yang ramah, berbahasa Indonesia santai.
+        ATURAN WAJIB:
+        1. JANGAN PERNAH menampilkan proses berpikir, analisis, atau reasoning kamu. Langsung jawab saja.
+        2. JANGAN pakai format seperti "* User asks:", "* Language:", "* Current date:".
+        3. Jawab langsung, singkat, dan natural seperti manusia.
+        4. Hari ini adalah ${hariIni}. Gunakan tanggal ini kalau ditanya soal hari / tanggal.
+        5. Jangan mengarang tanggal lain.` 
+      }]
+    },
     contents: [{ parts: [{ text: text }] }],
     generationConfig: { temperature: 0.7, maxOutputTokens: 8192 }
   };
@@ -80,7 +93,6 @@ async function callGemini(model, text, key) {
   );
   return await r.json();
 }
-
 async function kirim(chatId, text, token) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
