@@ -1,5 +1,5 @@
 // Ganti ke 26b-a4b-it (MoE) agar jauh lebih cepat dari 31b-it
-const MODEL = "gemma-4-31b-it";
+const MODEL = "gemma-4-26b-a4b-it"
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(200).send("Bot Gemma 4 Cepat Jalan!");
