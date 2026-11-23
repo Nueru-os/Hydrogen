@@ -1,5 +1,4 @@
-const MODEL = "gemini-4-hydrogen";
-const FALLBACK_MODEL = "gemini-3.8-flash";
+const MODELS = ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -7,9 +6,7 @@ export default async function handler(req, res) {
   }
   const update = req.body;
   try {
-    if (!update.message || !update.message.text) {
-      return res.status(200).send("OK");
-    }
+    if (!update.message || !update.message.text) return res.status(200).send("OK");
     const chatId = update.message.chat.id;
     const text = update.message.text;
     const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -26,26 +23,36 @@ export default async function handler(req, res) {
       body: JSON.stringify({ chat_id: chatId, action: "typing" })
     });
 
-    // 1. Coba Hydrogen dulu
-    let data = await callGemini(MODEL, text, GEMINI_API_KEY, true);
-    let pakaiFallback = false;
+    let data = null;
+    let modelTerpakai = MODELS[0];
+    let lastError = "";
 
-    // 2. Kalau Hydrogen error quota / high demand, pindah ke 3.8 Flash
-    if (data.error) {
-      console.log("Hydrogen error:", data.error.message);
-      pakaiFallback = true;
-      await kirim(chatId, "Jatah Hydrogen 4 habis / lagi rame, aku pakai model cadangan dulu ya...", TELEGRAM_TOKEN);
-      data = await callGemini(FALLBACK_MODEL, text, GEMINI_API_KEY, false);
+    // Coba satu-satu dari atas ke bawah
+    for (let i = 0; i < MODELS.length; i++) {
+      modelTerpakai = MODELS[i];
+      const isHydrogen = modelTerpakai === "gemini-4-hydrogen";
+      data = await callGemini(modelTerpakai, text, GEMINI_API_KEY, isHydrogen);
+      
+      if (!data.error) break; // Kalau berhasil, stop, jangan lanjut
+      
+      lastError = data.error.message;
+      console.log(modelTerpakai + " gagal: " + lastError);
+      
+      // Kalau masih ada cadangan, kasih tau user dan tunggu 2 detik dulu
+      if (i < MODELS.length - 1) {
+        await kirim(chatId, `Model ${modelTerpakai} lagi rame, coba pindah ke ${MODELS[i+1]}...`, TELEGRAM_TOKEN);
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
 
     let reply = "Maaf error.";
     if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
       reply = data.candidates[0].content.parts[0].text;
-      if (pakaiFallback) {
-        reply = "[Pakai 3.8 Flash - Cadangan]\n\n" + reply;
+      if (modelTerpakai !== MODELS[0]) {
+        reply = `[Pakai ${modelTerpakai} - Cadangan]\n\n` + reply;
       }
-    } else if (data.error) {
-      reply = "Fallback juga error: " + data.error.message;
+    } else {
+      reply = `Semua model Google lagi rame banget sekarang. Coba lagi 2-3 menit lagi ya.\n\nError terakhir: ${lastError}`;
     }
 
     for (let i = 0; i < reply.length; i += 4096) {
@@ -58,25 +65,17 @@ export default async function handler(req, res) {
   }
 }
 
-// Kalau isHydrogen = true, pakai Thinking HIGH. Kalau false (Flash), jangan pakai thinking biar tidak error
 async function callGemini(model, text, key, isHydrogen) {
   const body = {
     contents: [{ parts: [{ text: text }] }],
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 8192
-    }
+    generationConfig: { temperature: 0.7, maxOutputTokens: 8192 }
   };
   if (isHydrogen) {
     body.generationConfig.thinkingConfig = { thinkingLevel: "HIGH" };
   }
   const r = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    }
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
   );
   return await r.json();
 }
