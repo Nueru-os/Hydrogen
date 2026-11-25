@@ -93,11 +93,11 @@ export default async function handler(req, res) {
       reply = `Semua model Gemini sedang penuh/limit.\nDetail error: ${lastError}`;
     }
 
-    // Kirim balasan (dipecah per 4096 karakter sesuai batas maksimal Telegram)
-    for (let i = 0; i < reply.length; i += 4096) {
-      await kirim(chatId, reply.slice(i, i + 4096), TELEGRAM_TOKEN);
-    }
-
+    // Ubah dulu jawaban AI jadi format kolom salin, baru kirim
+let siapKirim = aiToTelegram(reply);
+for (let i = 0; i < siapKirim.length; i += 4096) {
+  await kirim(chatId, siapKirim.slice(i, i + 4096), TELEGRAM_TOKEN);
+}
     return res.status(200).send("OK");
   } catch (e) {
     console.error("Webhook Error:", e);
@@ -143,10 +143,23 @@ async function callGemini(model, contents, key) {
   return await r.json();
 }
 
+function aiToTelegram(text) {
+  let blocks = [];
+  // Simpan dulu semua ```kode``` biar gak ke-escape
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (m, lang, code) => {
+    blocks.push(`<pre language="${lang || 'text'}">${code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`);
+    return `__BLOCK${blocks.length - 1}__`;
+  });
+  // Escape sisa teks biasa
+  text = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Balikin lagi blok kodenya
+  blocks.forEach((b, i) => { text = text.replace(`__BLOCK${i}__`, b); });
+  return text;
+}
 async function kirim(chatId, text, token) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text })
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" })
   });
 }
