@@ -95,15 +95,48 @@ export default async function handler(req, res) {
 
     // Ubah dulu jawaban AI jadi format kolom salin, baru kirim
 let siapKirim = aiToTelegram(reply);
-for (let i = 0; i < siapKirim.length; i += 4096) {
-  await kirim(chatId, siapKirim.slice(i, i + 4096), TELEGRAM_TOKEN);
-}
+    // Pecah teks ASLI dulu, baru diformat per potongan
+    const maxLen = 3500;
+    let sisa = reply;
+    let lagiDiDalamKode = false;
+    let bahasaKode = "text";
+
+    while (sisa.length > 0) {
+      let batas = maxLen;
+
+      if (sisa.length > maxLen) {
+        let potong = sisa.lastIndexOf('\n', maxLen);
+        if (potong === -1) potong = sisa.lastIndexOf(' ', maxLen);
+        if (potong > 0) batas = potong;
+        // Kalau gak ketemu \n / spasi, ya udah potong paksa di 3500
+      }
+
+      let potongan = sisa.slice(0, batas);
+      sisa = sisa.slice(batas).trimStart();
+
+      // Cek apakah potongan ini buka / tutup blok kode
+      const backticks = potongan.match(/```(\w*)/g) || [];
+      for (let b of backticks) {
+        if (!lagiDiDalamKode) {
+          lagiDiDalamKode = true;
+          bahasaKode = b.replace(/```/, "") || "text";
+        } else {
+          lagiDiDalamKode = false;
+        }
+      }
+
+      // Kalau kepotong pas lagi di dalam kode, tutup dulu di potongan ini
+      // dan buka lagi di potongan berikutnya dengan bahasa yang sama
+      if (lagiDiDalamKode) {
+        potongan += '\n```';
+        sisa = '```' + bahasaKode + '\n' + sisa;
+      }
+
+      let siapKirim = aiToTelegram(potongan);
+      await kirim(chatId, siapKirim, TELEGRAM_TOKEN);
+    }
+
     return res.status(200).send("OK");
-  } catch (e) {
-    console.error("Webhook Error:", e);
-    return res.status(200).send("OK");
-  }
-}
 
 async function callGemini(model, contents, key) {
   const hariIni = new Date().toLocaleDateString('id-ID', {
