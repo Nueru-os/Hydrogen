@@ -8,7 +8,7 @@ const MODELS = [
 
 // Penyimpanan riwayat chat sementara di memori berdasarkan chatId
 const chatHistories = new Map();
-const MAX_HISTORY = 10; // Simpan maksimal 10 pesan terakhir agar hemat token
+const MAX_HISTORY = 10;
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(200).send("Bot Gemini Jalan!");
@@ -22,31 +22,25 @@ export default async function handler(req, res) {
     const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-    // Perintah /start
     if (text === "/start") {
       chatHistories.delete(chatId);
       await kirim(chatId, "Halo! Saya Gemini. Ketik apa saja untuk mulai ngobrol, atau ketik /reset untuk menghapus ingatan chat.", TELEGRAM_TOKEN);
       return res.status(200).send("OK");
     }
 
-    // Perintah /reset untuk membersihkan konteks obrolan
     if (text === "/reset") {
       chatHistories.delete(chatId);
       await kirim(chatId, "Ingatan percakapan sudah dihapus. Yuk mulai topik baru!", TELEGRAM_TOKEN);
       return res.status(200).send("OK");
     }
 
-    // Tampilkan status "sedang mengetik..."
     await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendChatAction`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, action: "typing" })
     });
 
-    // Ambil riwayat chat pengguna saat ini (jika belum ada, buat array kosong)
     let history = chatHistories.get(chatId) || [];
-
-    // Tambahkan pesan terbaru dari user ke dalam riwayat dengan role "user"
     const currentContents = [
       ...history,
       { role: "user", parts: [{ text: text }] }
@@ -56,21 +50,13 @@ export default async function handler(req, res) {
     let modelTerpakai = MODELS[0];
     let lastError = "";
 
-    // Coba panggil model satu per satu jika terjadi limit (429) atau error
     for (let i = 0; i < MODELS.length; i++) {
       modelTerpakai = MODELS[i];
       data = await callGemini(modelTerpakai, currentContents, GEMINI_API_KEY);
-      
-      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        break; // Berhasil mendapatkan jawaban, hentikan loop
-      }
-      
+      if (data.candidates?.[0]?.content?.parts?.[0]?.text) break;
       lastError = data.error ? data.error.message : "Respon kosong";
       console.log(`${modelTerpakai} gagal: ${lastError}`);
-      
-      if (i < MODELS.length - 1) {
-        await new Promise(r => setTimeout(r, 800)); // Jeda singkat sebelum pindah model
-      }
+      if (i < MODELS.length - 1) await new Promise(r => setTimeout(r, 800));
     }
 
     let reply = "Maaf, terjadi gangguan pada sistem.";
@@ -78,23 +64,14 @@ export default async function handler(req, res) {
 
     if (aiText) {
       reply = aiText;
-
-      // Simpan pesan user DAN balasan AI ke riwayat agar konteks tetap nyambung meski model berganti
       history.push({ role: "user", parts: [{ text: text }] });
       history.push({ role: "model", parts: [{ text: aiText }] });
-
-      // Potong riwayat lama jika melebihi batas agar tidak membengkak
-      if (history.length > MAX_HISTORY) {
-        history = history.slice(history.length - MAX_HISTORY);
-      }
+      if (history.length > MAX_HISTORY) history = history.slice(history.length - MAX_HISTORY);
       chatHistories.set(chatId, history);
-
     } else {
       reply = `Semua model Gemini sedang penuh/limit.\nDetail error: ${lastError}`;
     }
 
-    // Ubah dulu jawaban AI jadi format kolom salin, baru kirim
-let siapKirim = aiToTelegram(reply);
     // Pecah teks ASLI dulu, baru diformat per potongan
     const maxLen = 3500;
     let sisa = reply;
@@ -103,18 +80,14 @@ let siapKirim = aiToTelegram(reply);
 
     while (sisa.length > 0) {
       let batas = maxLen;
-
       if (sisa.length > maxLen) {
         let potong = sisa.lastIndexOf('\n', maxLen);
         if (potong === -1) potong = sisa.lastIndexOf(' ', maxLen);
         if (potong > 0) batas = potong;
-        // Kalau gak ketemu \n / spasi, ya udah potong paksa di 3500
       }
-
       let potongan = sisa.slice(0, batas);
       sisa = sisa.slice(batas).trimStart();
 
-      // Cek apakah potongan ini buka / tutup blok kode
       const backticks = potongan.match(/```(\w*)/g) || [];
       for (let b of backticks) {
         if (!lagiDiDalamKode) {
@@ -125,8 +98,6 @@ let siapKirim = aiToTelegram(reply);
         }
       }
 
-      // Kalau kepotong pas lagi di dalam kode, tutup dulu di potongan ini
-      // dan buka lagi di potongan berikutnya dengan bahasa yang sama
       if (lagiDiDalamKode) {
         potongan += '\n```';
         sisa = '```' + bahasaKode + '\n' + sisa;
@@ -137,58 +108,43 @@ let siapKirim = aiToTelegram(reply);
     }
 
     return res.status(200).send("OK");
+  } catch (e) {
+    console.error("Webhook Error:", e);
+    return res.status(200).send("OK");
+  }
+} // <-- PENUTUP HANDLER, INI YANG TADI HILANG
 
 async function callGemini(model, contents, key) {
   const hariIni = new Date().toLocaleDateString('id-ID', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    timeZone: 'Asia/Makassar'
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Makassar'
   });
-
   const body = {
     systemInstruction: {
-      parts: [{
-        text: `Kamu adalah teman chat Telegram, gunakan bahasa Indonesia yang santai, singkat, dan natural. Hari ini adalah ${hariIni}. Jawab langsung ke intinya tanpa menampilkan proses berpikir atau analisis panjang.`
-      }]
+      parts: [{ text: `Kamu adalah teman chat Telegram, gunakan bahasa Indonesia yang santai, singkat, dan natural. Hari ini adalah ${hariIni}. Jawab langsung ke intinya tanpa menampilkan proses berpikir atau analisis panjang. Setiap kode HARUS dibungkus dengan \`\`\`bahasa. Contoh: \`\`\`javascript ... \`\`\`.` }]
     },
-    contents: contents, // Mengirim seluruh riwayat percakapan
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 2048
-    }
+    contents: contents,
+    generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
   };
-
-  // Nonaktifkan thinking hanya pada model 2.5-flash / 2.5-flash-lite agar respon instan
   if (model.includes("2.5-flash")) {
     body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
   }
-
-  const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    }
-  );
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  });
   return await r.json();
 }
 
 function aiToTelegram(text) {
   let blocks = [];
-  // Simpan dulu semua ```kode``` biar gak ke-escape
   text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (m, lang, code) => {
     blocks.push(`<pre language="${lang || 'text'}">${code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`);
     return `__BLOCK${blocks.length - 1}__`;
   });
-  // Escape sisa teks biasa
   text = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  // Balikin lagi blok kodenya
   blocks.forEach((b, i) => { text = text.replace(`__BLOCK${i}__`, b); });
   return text;
 }
+
 async function kirim(chatId, text, token) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
